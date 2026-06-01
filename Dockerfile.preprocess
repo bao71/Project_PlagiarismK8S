@@ -1,0 +1,21 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    poppler-utils \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+        
+COPY requirements/preprocess.txt /app/requirements.txt
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r /app/requirements.txt
+
+COPY app /app/app
+
+CMD ["python", "-m", "app.worker.preprocess_worker"]

@@ -1,0 +1,12 @@
+apiVersion: plagiarism.io/v1
+kind: plagiarismcheck
+
+metadata:
+  name: check-023
+
+spec:
+  subjectId: test_ai
+  originalFilePath: minio://uploads/check-001/case1.pdf
+  outputResult: minio://results/check-018/result.json
+  comparePods: 5
+  

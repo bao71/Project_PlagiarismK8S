@@ -1,0 +1,75 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: plagiarism-check-check-001
+  namespace: plagiarism
+  labels:
+    app: plagiarism-worker
+    check-name: check-001
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: plagiarism-worker
+        check-name: check-001
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: plagiarism-worker
+          image: baoghetcode/plagiarism-worker:1.10
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: SUBJECT_ID
+              value: "test_ai"
+
+            - name: PREPROCESS_RESULT_PATH
+              value: "minio://preprocessed/check-001/result.json"
+
+            - name: RESULT_OUTPUT_PATH
+              value: "minio://results/check-001/result6.json"
+
+            - name: MINIO_ENDPOINT
+              value: "minio-svc-private.storage.svc.cluster.local:9000"
+
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+
+            # Sửa lại host này theo service Milvus thật của bạn
+            - name: MILVUS_HOST
+              value: "milvus.milvus.svc.cluster.local"
+
+            - name: MILVUS_PORT
+              value: "19530"
+
+            # Sửa lại DSN Postgres theo DB thật của bạn
+            - name: POSTGRES_DSN
+              value: "postgresql://postgres:postgres@postgresdb.streaming.svc.cluster.local:5432/plagiarism"
+
+            - name: MINIO_BUCKET
+              value: "uploads"
+
+            - name: EMBEDDING_MODEL
+              value: "keepitreal/vietnamese-sbert"
+
+            - name: MINHASH_THRESHOLD
+              value: "0.05"
+
+          resources:  
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"

@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: preprocess-test
+spec:
+  template:
+    spec:
+      containers:
+      - name: preprocess
+        image: baoghetcode/preprocess-worker:1.1
+        env:
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: access-key
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: secret-key
+        - name: MINIO_ENDPOINT
+          value: "minio-svc-private.storage.svc.cluster.local:9000"
+        - name: INPUT_PDF_PATH
+          value: "minio://uploads/check-001/BaoCaoDoAn1_NQB_Final.pdf"
+        - name: OUTPUT_JSON_PATH
+          value: "minio://preprocessed/check-001/BaoCaoDoAn1_NQB_Final.json"
+      restartPolicy: Never

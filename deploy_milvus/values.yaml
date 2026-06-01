@@ -1,0 +1,45 @@
+cluster:
+  enabled: false
+
+image:
+  all:
+    tag: v2.4.5
+
+etcd:
+  replicaCount: 1
+
+minio:
+  enabled: false
+
+externalS3:
+  enabled: true
+  host: minio-svc-private.storage.svc.cluster.local
+  port: 9000
+  accessKey: minioadmin
+  secretKey: minioadmin
+  useSSL: false
+  bucketName: milvus
+
+pulsar:
+  enabled: false
+
+service:
+  type: ClusterIP
+
+standalone:
+  replicas: 1
+
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    accessMode: ReadWriteOnce
+    size: 20Gi
+
+resources:
+  requests:
+    memory: 2Gi
+    cpu: 1
+
+  limits:
+    memory: 4Gi
+    cpu: 2
