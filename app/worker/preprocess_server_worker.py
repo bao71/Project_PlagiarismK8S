@@ -5,17 +5,19 @@ from io import BytesIO
 from typing import Any
 
 import asyncpg
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from minio import Minio
 from minio.error import S3Error
-import uvicorn
-
-from app.services import preprocessing
+import signal
+from app.services import embedding
 from app.services import minhash
+from app.services import preprocessing
 
 
 app = FastAPI()
+
 
 STATE = {
     "ready": False,
@@ -28,6 +30,7 @@ STATE = {
 
     "full_text": None,
     "sentences": [],
+    "query_embeddings": [],
     "candidates": [],
 
     "expected_parts": 1,
@@ -44,7 +47,6 @@ MINIO_ENDPOINT = os.getenv(
 
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
 POSTGRES_DSN = os.getenv("POSTGRES_DSN")
@@ -52,6 +54,87 @@ POSTGRES_DSN = os.getenv("POSTGRES_DSN")
 MINHASH_THRESHOLD = float(
     os.getenv("MINHASH_THRESHOLD", "0.05")
 )
+
+async def shutdown_after_final_written(delay_seconds: int = 2):
+    await asyncio.sleep(delay_seconds)
+
+    print(
+        "=== Final result written, shutting down preprocess server ===",
+        flush=True,
+    )
+
+    os.kill(
+        os.getpid(),
+        signal.SIGTERM,
+    )
+def sentence_record_to_dict(sentence):
+    if hasattr(sentence, "model_dump"):
+        return sentence.model_dump()
+
+    if hasattr(sentence, "dict"):
+        return sentence.dict()
+
+    if isinstance(sentence, dict):
+        return sentence
+
+    return {
+        "page_number": sentence.page_number,
+        "sentence_index": sentence.sentence_index,
+        "sentence_index_page": sentence.sentence_index_page,
+        "sentence_text": sentence.sentence_text,
+        "bbox_x0": sentence.bbox_x0,
+        "bbox_y0": sentence.bbox_y0,
+        "bbox_x1": sentence.bbox_x1,
+        "bbox_y1": sentence.bbox_y1,
+    }
+
+
+def normalize_sentences_for_embedding(sentence_records):
+    sentence_items = [
+        sentence_record_to_dict(sentence)
+        for sentence in sentence_records
+    ]
+
+    sentence_items = sorted(
+        sentence_items,
+        key=lambda x: int(x.get("sentence_index", 0)),
+    )
+
+    for pos, sentence in enumerate(sentence_items):
+        sentence_index = int(sentence.get("sentence_index", pos))
+
+        if sentence_index != pos:
+            raise ValueError(
+                f"Sentence index mismatch: "
+                f"list_position={pos}, sentence_index={sentence_index}. "
+                f"Checker requires sentence_index == list position."
+            )
+
+        if not sentence.get("sentence_text"):
+            raise ValueError(
+                f"Missing sentence_text at sentence_index={sentence_index}"
+            )
+
+    return sentence_items
+
+
+def validate_embeddings_alignment(
+    sentence_items: list[dict],
+    query_embeddings: list[list[float]],
+):
+    if len(sentence_items) != len(query_embeddings):
+        raise ValueError(
+            f"Embedding count mismatch: "
+            f"sentences={len(sentence_items)}, "
+            f"embeddings={len(query_embeddings)}"
+        )
+
+    for pos, vector in enumerate(query_embeddings):
+        if len(vector) != 768:
+            raise ValueError(
+                f"Embedding dim mismatch at sentence_index={pos}: "
+                f"dim={len(vector)}, expected=768"
+            )
 
 
 def create_minio_client() -> Minio:
@@ -79,6 +162,7 @@ def parse_minio_path(path: str):
         raise ValueError(f"Invalid MinIO path: {path}")
 
     bucket, object_name = raw.split("/", 1)
+
     return bucket, object_name
 
 
@@ -131,24 +215,6 @@ async def save_json_to_minio(path: str, data: dict):
         ) from e
 
 
-def convert_sentences(sentences: list[Any]) -> list[dict]:
-    results = []
-
-    for s in sentences:
-        results.append({
-            "page_number": getattr(s, "page_number", 0),
-            "sentence_index": getattr(s, "sentence_index", 0),
-            "sentence_index_page": getattr(s, "sentence_index_page", 0),
-            "sentence_text": getattr(s, "sentence_text", ""),
-            "bbox_x0": getattr(s, "bbox_x0", 0.0),
-            "bbox_y0": getattr(s, "bbox_y0", 0.0),
-            "bbox_x1": getattr(s, "bbox_x1", 0.0),
-            "bbox_y1": getattr(s, "bbox_y1", 0.0),
-        })
-
-    return results
-
-
 def split_candidates(
     candidates: list[dict],
     part_index: int,
@@ -183,10 +249,15 @@ def merge_results() -> dict:
         labels = part_result.get("sentence_labels", [])
 
         for i, label in enumerate(labels):
+            if i >= total_sentences:
+                break
+
             if label == 1:
                 final_labels[i] = 1
 
-        references.extend(part_result.get("references", []))
+        references.extend(
+            part_result.get("references", [])
+        )
 
     plagiarized_sentences = sum(final_labels)
 
@@ -253,9 +324,33 @@ async def prepare_data():
         if not sentence_records:
             raise ValueError("Cannot extract any sentence")
 
-        sentences = convert_sentences(sentence_records)
+        sentence_items = normalize_sentences_for_embedding(
+            sentence_records
+        )
 
-        print(f"Extracted sentences: {len(sentences)}", flush=True)
+        sentence_texts = [
+            sentence["sentence_text"]
+            for sentence in sentence_items
+        ]
+
+        print(f"Extracted sentences: {len(sentence_items)}", flush=True)
+        print("Generating query embeddings in stage1...", flush=True)
+
+        query_embeddings = embedding.embed_sentences(
+            sentence_texts
+        )
+
+        validate_embeddings_alignment(
+            sentence_items=sentence_items,
+            query_embeddings=query_embeddings,
+        )
+
+        print(
+            f"Generated query embeddings in stage1: "
+            f"sentences={len(sentence_items)}, "
+            f"embeddings={len(query_embeddings)}",
+            flush=True,
+        )
 
         minhash_values = minhash.compute_minhash(full_text)
 
@@ -275,7 +370,8 @@ async def prepare_data():
         print(f"Candidates found: {len(candidates)}", flush=True)
 
         STATE["full_text"] = full_text
-        STATE["sentences"] = sentences
+        STATE["sentences"] = sentence_items
+        STATE["query_embeddings"] = query_embeddings
         STATE["candidates"] = candidates
 
         STATE["ready"] = True
@@ -286,7 +382,10 @@ async def prepare_data():
         STATE["failed"] = True
         STATE["error"] = str(e)
 
-        print(f"=== Stage 1 preprocess server FAILED: {e} ===", flush=True)
+        print(
+            f"=== Stage 1 preprocess server FAILED: {e} ===",
+            flush=True,
+        )
 
 
 @app.on_event("startup")
@@ -325,6 +424,7 @@ def ready():
         "ready": True,
         "candidate_count": len(STATE["candidates"]),
         "sentence_count": len(STATE["sentences"]),
+        "embedding_count": len(STATE["query_embeddings"]),
     }
 
 
@@ -339,6 +439,16 @@ def get_part(
             detail="preprocess not ready",
         )
 
+    if len(STATE["sentences"]) != len(STATE["query_embeddings"]):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Embedding mismatch: "
+                f"sentences={len(STATE['sentences'])}, "
+                f"embeddings={len(STATE['query_embeddings'])}"
+            ),
+        )
+
     candidates_slice = split_candidates(
         candidates=STATE["candidates"],
         part_index=part_index,
@@ -349,10 +459,10 @@ def get_part(
         "subject_id": STATE["subject_id"],
         "part_index": part_index,
         "part_count": part_count,
-        "total_candidates": len(STATE["candidates"]),
-        "processed_candidates": len(candidates_slice),
         "total_sentences": len(STATE["sentences"]),
+        "total_candidates": len(STATE["candidates"]),
         "sentences": STATE["sentences"],
+        "query_embeddings": STATE["query_embeddings"],
         "candidates": candidates_slice,
     }
 
@@ -402,6 +512,10 @@ async def part_result(payload: dict):
 
         print("=== Final result written ===", flush=True)
 
+        asyncio.create_task(
+            shutdown_after_final_written(delay_seconds=2)
+        )
+
     return {
         "ok": True,
         "received": received,
@@ -418,6 +532,7 @@ def status():
         "error": STATE["error"],
         "candidate_count": len(STATE["candidates"]),
         "sentence_count": len(STATE["sentences"]),
+        "embedding_count": len(STATE["query_embeddings"]),
         "received_parts": len(STATE["part_results"]),
         "expected_parts": STATE["expected_parts"],
         "final_written": STATE["final_written"],

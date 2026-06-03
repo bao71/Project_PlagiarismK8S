@@ -147,6 +147,10 @@ def build_preprocess_server_pod(
                             value=str(expected_parts),
                         ),
                         client.V1EnvVar(
+                            name="EMBEDDING_MODEL",
+                            value=EMBEDDING_MODEL,
+                        ),
+                        client.V1EnvVar(
                             name="POSTGRES_DSN",
                             value=POSTGRES_DSN,
                         ),
@@ -252,13 +256,27 @@ def build_compare_job(
                                     name="MILVUS_PORT",
                                     value=MILVUS_PORT,
                                 ),
+                            
+                                
                                 client.V1EnvVar(
-                                    name="EMBEDDING_MODEL",
-                                    value=EMBEDDING_MODEL,
+                                    name="CHECK_NAME",
+                                    value=name,
                                 ),
                                 client.V1EnvVar(
-                                    name="POSTGRES_DSN",
-                                    value=POSTGRES_DSN,
+                                    name="REDIS_HOST",
+                                    value="redis.cache.svc.cluster.local",
+                                ),
+                                client.V1EnvVar(
+                                    name="REDIS_PORT",
+                                    value="6379",
+                                ),
+                                client.V1EnvVar(
+                                    name="REDIS_PASSWORD",
+                                    value="Redis@123456",
+                                ),
+                                client.V1EnvVar(
+                                    name="REDIS_TTL_SECONDS",
+                                    value="86400",
                                 ),
                                 client.V1EnvVar(
                                     name="MINIO_BUCKET",
