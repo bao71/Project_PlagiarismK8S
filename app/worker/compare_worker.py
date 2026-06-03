@@ -1,10 +1,9 @@
-import asyncio
-import json
 import os
+import time
 from typing import Any, Dict
+
 import redis
 import requests
-import time
 
 from app.services.checker import run_plagiarism_check
 from app.services.preprocessing import SentenceRecord
@@ -46,6 +45,8 @@ def create_redis_client():
         )
 
         return None, redis_ttl_seconds
+
+
 def convert_check_response_to_dict(check_response: Any) -> Dict[str, Any]:
     if hasattr(check_response, "model_dump"):
         return check_response.model_dump()
@@ -97,9 +98,11 @@ def convert_sentences_to_records(
 
     return sentence_records
 
+
 def main():
     check_name = os.getenv("CHECK_NAME")
     redis_client, redis_ttl_seconds = create_redis_client()
+
     worker_start = time.perf_counter()
 
     stage1_url = os.getenv("STAGE1_URL")
@@ -111,7 +114,8 @@ def main():
 
     if redis_client is not None and not check_name:
         print(
-            "Redis enabled but CHECK_NAME is missing; Redis matched cache will not be used",
+            "Redis enabled but CHECK_NAME is missing; "
+            "Redis matched cache will not be used",
             flush=True,
         )
 
@@ -120,6 +124,7 @@ def main():
     print(f"PART_INDEX={part_index}", flush=True)
     print(f"PART_COUNT={part_count}", flush=True)
     print(f"CHECK_NAME={check_name}", flush=True)
+
     response = requests.get(
         f"{stage1_url}/part",
         params={
@@ -142,6 +147,7 @@ def main():
 
     print(
         f"Loaded sentences={len(raw_sentences)}, "
+        f"embeddings={len(query_embeddings)}, "
         f"candidates={len(candidates)}",
         flush=True,
     )
@@ -149,6 +155,13 @@ def main():
     sentence_records = convert_sentences_to_records(
         raw_sentences
     )
+
+    if len(query_embeddings) != len(sentence_records):
+        raise ValueError(
+            f"Embedding count mismatch: "
+            f"sentences={len(sentence_records)}, "
+            f"embeddings={len(query_embeddings)}"
+        )
 
     if not candidates:
         result = {
@@ -158,22 +171,13 @@ def main():
             "is_plagiarized": False,
             "sentence_labels": [0] * len(sentence_records),
             "references": [],
+            "plagiarism_check_seconds": 0.0,
         }
 
     else:
-        sentence_texts = [
-            s.sentence_text
-            for s in sentence_records
-        ]
-
-        print("Generating embeddings...", flush=True)
-
-        query_embeddings = embedding.embed_sentences(
-            sentence_texts
-        )
-
-        
         print("Running plagiarism check...", flush=True)
+
+        check_start = time.perf_counter()
 
         check_response = run_plagiarism_check(
             query_sentences=sentence_records,
@@ -183,10 +187,22 @@ def main():
             check_name=check_name,
         )
 
+        check_seconds = round(
+            time.perf_counter() - check_start,
+            4,
+        )
+
+        print(
+            f"PLAGIARISM_CHECK_SECONDS={check_seconds}",
+            flush=True,
+        )
+
         result = convert_check_response_to_dict(
             check_response
         )
-        
+
+        result["plagiarism_check_seconds"] = check_seconds
+
     if redis_client is not None and check_name:
         try:
             redis_client.expire(
@@ -207,7 +223,6 @@ def main():
 
     result["part_index"] = part_index
     result["part_count"] = part_count
-    
     result["candidate_count"] = len(candidates)
     result["total_compare_worker_seconds"] = total_compare_worker_seconds
 
@@ -245,6 +260,7 @@ def main():
     )
 
     print("=== Compare worker completed ===", flush=True)
+
 
 if __name__ == "__main__":
     main()
