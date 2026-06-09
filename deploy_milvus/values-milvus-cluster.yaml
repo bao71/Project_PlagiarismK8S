@@ -1,0 +1,151 @@
+cluster:
+  enabled: true
+
+image:
+  all:
+    tag: v2.4.5
+
+service:
+  type: ClusterIP
+
+minio:
+  enabled: false
+
+externalS3:
+  enabled: true
+  host: minio-svc-private.storage.svc.cluster.local
+  port: 9000
+  accessKey: minioadmin
+  secretKey: minioadmin
+  useSSL: false
+  bucketName: milvus-cluster
+
+pulsar:
+  enabled: true
+  persistence: true
+
+  components:
+    zookeeper: true
+    bookkeeper: true
+    broker: true
+    proxy: true
+    autorecovery: true
+
+  zookeeper:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: "100m"
+    volumes:
+      persistence: true
+      data:
+        name: data
+        size: 5Gi
+        storageClassName: longhorn
+        local_storage: false
+
+  bookkeeper:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: "200m"
+    volumes:
+      persistence: true
+      journal:
+        name: journal
+        size: 5Gi
+        storageClassName: longhorn
+        local_storage: false
+      ledgers:
+        name: ledgers
+        size: 10Gi
+        storageClassName: longhorn
+        local_storage: false
+    configData:
+      PULSAR_MEM: >
+        -Xms512m
+        -Xmx512m
+        -XX:MaxDirectMemorySize=1024m
+      managedLedgerDefaultEnsembleSize: "1"
+      managedLedgerDefaultWriteQuorum: "1"
+      managedLedgerDefaultAckQuorum: "1"
+
+  broker:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: "200m"
+    configData:
+      PULSAR_MEM: >
+        -Xms512m
+        -Xmx512m
+        -XX:MaxDirectMemorySize=1024m
+      managedLedgerDefaultEnsembleSize: "1"
+      managedLedgerDefaultWriteQuorum: "1"
+      managedLedgerDefaultAckQuorum: "1"
+      backlogQuotaDefaultLimitGB: "2"
+
+  proxy:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: "100m"
+
+  autorecovery:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: "100m"
+
+etcd:
+  replicaCount: 1
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    accessMode: ReadWriteOnce
+    size: 5Gi
+
+proxy:
+  replicas: 1
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: "200m"
+
+rootCoordinator:
+  replicas: 1
+
+queryCoordinator:
+  replicas: 1
+
+queryNode:
+  replicas: 2
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: "500m"
+
+dataCoordinator:
+  replicas: 1
+
+dataNode:
+  replicas: 1
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: "200m"
+
+indexCoordinator:
+  replicas: 1
+
+indexNode:
+  replicas: 1
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: "200m"

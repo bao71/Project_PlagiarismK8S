@@ -12,11 +12,8 @@ MILVUS_HOST = "milvus.milvus.svc.cluster.local"
 MILVUS_PORT = "19530"
 EMBEDDING_MODEL = "/models/vietnamese-sbert"
 
-# Image mới theo kiến trúc:
-# Stage 1: preprocess-server giữ sống bằng FastAPI/Uvicorn.
-# Stage 2: compare-worker gọi HTTP sang Stage 1 để lấy dữ liệu.
-PREPROCESS_SERVER_IMAGE = "baoghetcode/preprocess-server:1.0"
-COMPARE_WORKER_IMAGE = "baoghetcode/compare-worker:1.4"
+PREPROCESS_SERVER_IMAGE = "baoghetcode/preprocess-server:1.1"
+COMPARE_WORKER_IMAGE = "baoghetcode/compare-worker:1.6"
 
 
 def minio_env_vars() -> list[client.V1EnvVar]:
@@ -47,12 +44,7 @@ def minio_env_vars() -> list[client.V1EnvVar]:
 
 
 def build_preprocess_server_service(name: str) -> client.V1Service:
-    """
-    Service nội bộ để các compare-worker Pod gọi HTTP sang preprocess-server.
-
-    DNS sẽ là:
-    http://preprocess-server-<check-name>.plagiarism.svc.cluster.local:8000
-    """
+   
 
     service_name = f"preprocess-server-{name}"
 
@@ -92,16 +84,7 @@ def build_preprocess_server_pod(
     result_output_path: str,
     expected_parts: int,
 ) -> client.V1Pod:
-    """
-    Stage 1 Pod.
-
-    Pod này không exit sau khi preprocess xong.
-    Nó chạy FastAPI/Uvicorn, giữ sentences/candidates trong RAM,
-    và expose API:
-    - GET /ready
-    - GET /part
-    - POST /part-result
-    """
+   
 
     pod_name = f"preprocess-server-{name}"
 
@@ -151,6 +134,18 @@ def build_preprocess_server_pod(
                             value=EMBEDDING_MODEL,
                         ),
                         client.V1EnvVar(
+                            name="MINIO_BUCKET",
+                            value="uploads",
+                        ),
+                        client.V1EnvVar(
+                            name="MILVUS_HOST",
+                            value="milvus.milvus.svc.cluster.local",
+                        ),
+                        client.V1EnvVar(
+                            name="MILVUS_PORT",
+                            value="19530",
+                        ),
+                        client.V1EnvVar(
                             name="POSTGRES_DSN",
                             value=POSTGRES_DSN,
                         ),
@@ -190,16 +185,7 @@ def build_compare_job(
     part_index: int,
     part_count: int,
 ) -> client.V1Job:
-    """
-    Stage 2 Job.
-
-    Mỗi compare job:
-    - gọi GET /part?part_index=X&part_count=N
-    - nhận sentences + candidate slice
-    - check đạo văn
-    - POST /part-result về preprocess-server
-    - exit 0
-    """
+    
 
     job_name = f"compare-{name}-part-{part_index}"
 
@@ -256,8 +242,22 @@ def build_compare_job(
                                     name="MILVUS_PORT",
                                     value=MILVUS_PORT,
                                 ),
-                            
-                                
+                                client.V1EnvVar(
+                                    name="POSTGRES_DSN",
+                                    value=POSTGRES_DSN,
+                                ),
+                                client.V1EnvVar(
+                                    name="EMBEDDING_MODEL",
+                                    value="/models/vietnamese-sbert",
+                                ),
+                                client.V1EnvVar(
+                                    name="MILVUS_REPLICA_NUMBER",
+                                    value="2",
+                                ),
+                                client.V1EnvVar(
+                                    name="MILVUS_COLLECTION_NAME",
+                                    value="PlagiarismDetection",
+                                ),
                                 client.V1EnvVar(
                                     name="CHECK_NAME",
                                     value=name,

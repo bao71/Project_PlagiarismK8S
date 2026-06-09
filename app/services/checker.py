@@ -3,9 +3,11 @@ from app.repositories import milvus_repo
 from app.services.preprocessing import SentenceRecord
 from pymilvus import Collection
 import json
+import os
 SENTENCE_SIMILARITY_THRESHOLD = 0.8
 PLAGIARISM_CONCLUSION_THRESHOLD = 0.8
-
+collection_name = os.getenv("MILVUS_COLLECTION_NAME", "PlagiarismDetection")
+replica_number = int(os.getenv("MILVUS_REPLICA_NUMBER", "1"))
 
 def redis_matched_key(check_name: str) -> str:
     return f"plagiarism:{check_name}:matched_sentences"
@@ -80,8 +82,14 @@ def check(
 ) -> list[ReferenceMatch]:
     milvus_repo.connect_milvus()
 
-    collection = Collection("PlagiarismDetection")
-    collection.load()
+
+    collection = Collection(collection_name)
+    collection.load(replica_number=replica_number)
+    print(
+        f"Loaded Milvus collection={collection_name} "
+        f"replica_number={replica_number}",
+        flush=True,
+    )
 
     reference_matches: list[ReferenceMatch] = []
 
