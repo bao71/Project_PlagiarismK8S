@@ -1,16 +1,18 @@
 import asyncio
 import json
 import os
+import signal
 from io import BytesIO
 from typing import Any
-import requests
+
 import asyncpg
+import redis
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from minio import Minio
 from minio.error import S3Error
-import signal
+
 from app.services import embedding
 from app.services import minhash
 from app.services import preprocessing
@@ -24,9 +26,9 @@ STATE = {
     "failed": False,
     "error": None,
 
+    "check_name": None,
     "subject_id": None,
     "input_pdf_path": None,
-    "result_output_path": None,
 
     "full_text": None,
     "sentences": [],
@@ -35,7 +37,7 @@ STATE = {
 
     "expected_parts": 1,
     "part_results": {},
-    "callback_url": None,
+
     "final_written": False,
 }
 
@@ -44,22 +46,28 @@ MINIO_ENDPOINT = os.getenv(
     "MINIO_ENDPOINT",
     "minio-svc-private.storage.svc.cluster.local:9000",
 )
-
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
 POSTGRES_DSN = os.getenv("POSTGRES_DSN")
 
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_TTL_SECONDS = int(os.getenv("REDIS_TTL_SECONDS", "86400"))
+
 MINHASH_THRESHOLD = float(
     os.getenv("MINHASH_THRESHOLD", "0.05")
 )
+
 
 async def shutdown_after_final_written(delay_seconds: int = 2):
     await asyncio.sleep(delay_seconds)
 
     print(
-        "=== Final result written, shutting down preprocess server ===",
+        "=== Final result saved, shutting down preprocess server ===",
         flush=True,
     )
 
@@ -67,6 +75,105 @@ async def shutdown_after_final_written(delay_seconds: int = 2):
         os.getpid(),
         signal.SIGTERM,
     )
+
+
+def redis_status_key(check_name: str) -> str:
+    return f"plagiarism:check:{check_name}:status"
+
+
+def redis_result_key(check_name: str) -> str:
+    return f"plagiarism:check:{check_name}:result"
+
+
+def redis_error_key(check_name: str) -> str:
+    return f"plagiarism:check:{check_name}:error"
+
+
+def create_redis_client() -> redis.Redis:
+    if not REDIS_HOST:
+        raise ValueError("Missing REDIS_HOST")
+
+    client = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        password=REDIS_PASSWORD,
+        decode_responses=True,
+        socket_connect_timeout=3,
+        socket_timeout=5,
+    )
+
+    client.ping()
+    return client
+
+
+async def save_json_to_redis(check_name: str, data: dict):
+    def _save():
+        client = create_redis_client()
+        pipe = client.pipeline()
+
+        pipe.setex(
+            redis_result_key(check_name),
+            REDIS_TTL_SECONDS,
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+
+        pipe.setex(
+            redis_status_key(check_name),
+            REDIS_TTL_SECONDS,
+            "completed",
+        )
+
+        pipe.execute()
+
+    await asyncio.to_thread(_save)
+
+    print(
+        f"Saved final result to Redis: check_name={check_name}",
+        flush=True,
+    )
+
+
+async def save_error_to_redis(check_name: str | None, error: str):
+    if not check_name:
+        return
+
+    def _save():
+        client = create_redis_client()
+        pipe = client.pipeline()
+
+        pipe.setex(
+            redis_error_key(check_name),
+            REDIS_TTL_SECONDS,
+            error,
+        )
+
+        pipe.setex(
+            redis_status_key(check_name),
+            REDIS_TTL_SECONDS,
+            "failed",
+        )
+
+        pipe.execute()
+
+    try:
+        await asyncio.to_thread(_save)
+        print(
+            f"Saved error to Redis: check_name={check_name}, error={error}",
+            flush=True,
+        )
+    except Exception as redis_error:
+        print(
+            f"Cannot save error to Redis: check_name={check_name}, "
+            f"error={error}, redis_error={redis_error}",
+            flush=True,
+        )
+
+
 def sentence_record_to_dict(sentence):
     if hasattr(sentence, "model_dump"):
         return sentence.model_dump()
@@ -186,55 +293,6 @@ async def load_pdf_bytes_from_minio(path: str) -> bytes:
         ) from e
 
 
-async def save_json_to_minio(path: str, data: dict):
-    bucket, object_name = parse_minio_path(path)
-    client = create_minio_client()
-
-    payload = json.dumps(
-        data,
-        ensure_ascii=False,
-        indent=2,
-        default=str,
-    ).encode("utf-8")
-
-    try:
-        if not client.bucket_exists(bucket):
-            client.make_bucket(bucket)
-
-        client.put_object(
-            bucket_name=bucket,
-            object_name=object_name,
-            data=BytesIO(payload),
-            length=len(payload),
-            content_type="application/json",
-        )
-
-    except S3Error as e:
-        raise RuntimeError(
-            f"Cannot save JSON to MinIO: {path}, error={e}"
-        ) from e
-
-async def post_json_to_callback(url: str, data: dict):
-    try:
-        response = await asyncio.to_thread(
-            requests.post,
-            url,
-            json=data,
-            timeout=30,
-        )
-
-        response.raise_for_status()
-
-        print(
-            f"Posted final result to callback_url={url}",
-            flush=True,
-        )
-
-    except Exception as e:
-        raise RuntimeError(
-            f"Cannot post final result to callback_url={url}, error={e}"
-        ) from e
-
 def split_candidates(
     candidates: list[dict],
     part_index: int,
@@ -298,12 +356,15 @@ def merge_results() -> dict:
 
 
 async def prepare_data():
+    check_name = os.getenv("CHECK_NAME")
+
     try:
         subject_id = os.getenv("SUBJECT_ID")
         input_pdf_path = os.getenv("INPUT_PDF_PATH")
-        result_output_path = os.getenv("RESULT_OUTPUT_PATH")
-        callback_url = os.getenv("CALLBACK_URL")
         expected_parts = int(os.getenv("EXPECTED_PARTS", "1"))
+
+        if not check_name:
+            raise ValueError("Missing CHECK_NAME")
 
         if not subject_id:
             raise ValueError("Missing SUBJECT_ID")
@@ -311,24 +372,25 @@ async def prepare_data():
         if not input_pdf_path:
             raise ValueError("Missing INPUT_PDF_PATH")
 
-        if not callback_url:
-            raise ValueError("Missing CALLBACK_URL")
-
         if not POSTGRES_DSN:
             raise ValueError("Missing POSTGRES_DSN")
 
+        if not REDIS_HOST:
+            raise ValueError("Missing REDIS_HOST")
+
+        STATE["check_name"] = check_name
         STATE["subject_id"] = subject_id
         STATE["input_pdf_path"] = input_pdf_path
-        STATE["result_output_path"] = result_output_path
         STATE["expected_parts"] = expected_parts
-        STATE["callback_url"] = callback_url
 
         print("=== Stage 1 preprocess server starting ===", flush=True)
+        print(f"CHECK_NAME={check_name}", flush=True)
         print(f"SUBJECT_ID={subject_id}", flush=True)
         print(f"INPUT_PDF_PATH={input_pdf_path}", flush=True)
-        print(f"RESULT_OUTPUT_PATH={result_output_path}", flush=True)
         print(f"EXPECTED_PARTS={expected_parts}", flush=True)
-        print(f"CALLBACK_URL={callback_url}", flush=True)
+        print(f"REDIS_HOST={REDIS_HOST}", flush=True)
+        print(f"REDIS_PORT={REDIS_PORT}", flush=True)
+
         pdf_bytes = await load_pdf_bytes_from_minio(input_pdf_path)
 
         if not pdf_bytes:
@@ -403,6 +465,8 @@ async def prepare_data():
     except Exception as e:
         STATE["failed"] = True
         STATE["error"] = str(e)
+
+        await save_error_to_redis(check_name, str(e))
 
         print(
             f"=== Stage 1 preprocess server FAILED: {e} ===",
@@ -524,19 +588,40 @@ async def part_result(payload: dict):
 
     if received == expected and not STATE["final_written"]:
         final_result = merge_results()
+        check_name = STATE["check_name"]
 
-        await post_json_to_callback(
-            STATE["callback_url"],
-            final_result,
-        )
+        try:
+            await save_json_to_redis(
+                check_name,
+                final_result,
+            )
 
-        STATE["final_written"] = True
+            STATE["final_written"] = True
 
-        print("=== Final result posted to API callback ===", flush=True)
+            print("=== Final result saved to Redis ===", flush=True)
 
-        asyncio.create_task(
-            shutdown_after_final_written(delay_seconds=2)
-        )
+            asyncio.create_task(
+                shutdown_after_final_written(delay_seconds=2)
+            )
+
+        except Exception as e:
+            STATE["failed"] = True
+            STATE["error"] = str(e)
+
+            await save_error_to_redis(
+                check_name,
+                str(e),
+            )
+
+            print(
+                f"=== Failed to save final result to Redis: {e} ===",
+                flush=True,
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail=f"Cannot save final result to Redis: {e}",
+            )
 
     return {
         "ok": True,
@@ -552,6 +637,7 @@ def status():
         "ready": STATE["ready"],
         "failed": STATE["failed"],
         "error": STATE["error"],
+        "check_name": STATE["check_name"],
         "candidate_count": len(STATE["candidates"]),
         "sentence_count": len(STATE["sentences"]),
         "embedding_count": len(STATE["query_embeddings"]),
