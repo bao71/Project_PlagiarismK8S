@@ -3,7 +3,7 @@ import json
 import os
 from io import BytesIO
 from typing import Any
-
+import requests
 import asyncpg
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -35,7 +35,7 @@ STATE = {
 
     "expected_parts": 1,
     "part_results": {},
-
+    "callback_url": None,
     "final_written": False,
 }
 
@@ -214,6 +214,26 @@ async def save_json_to_minio(path: str, data: dict):
             f"Cannot save JSON to MinIO: {path}, error={e}"
         ) from e
 
+async def post_json_to_callback(url: str, data: dict):
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            url,
+            json=data,
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        print(
+            f"Posted final result to callback_url={url}",
+            flush=True,
+        )
+
+    except Exception as e:
+        raise RuntimeError(
+            f"Cannot post final result to callback_url={url}, error={e}"
+        ) from e
 
 def split_candidates(
     candidates: list[dict],
@@ -282,6 +302,7 @@ async def prepare_data():
         subject_id = os.getenv("SUBJECT_ID")
         input_pdf_path = os.getenv("INPUT_PDF_PATH")
         result_output_path = os.getenv("RESULT_OUTPUT_PATH")
+        callback_url = os.getenv("CALLBACK_URL")
         expected_parts = int(os.getenv("EXPECTED_PARTS", "1"))
 
         if not subject_id:
@@ -290,8 +311,8 @@ async def prepare_data():
         if not input_pdf_path:
             raise ValueError("Missing INPUT_PDF_PATH")
 
-        if not result_output_path:
-            raise ValueError("Missing RESULT_OUTPUT_PATH")
+        if not callback_url:
+            raise ValueError("Missing CALLBACK_URL")
 
         if not POSTGRES_DSN:
             raise ValueError("Missing POSTGRES_DSN")
@@ -300,13 +321,14 @@ async def prepare_data():
         STATE["input_pdf_path"] = input_pdf_path
         STATE["result_output_path"] = result_output_path
         STATE["expected_parts"] = expected_parts
+        STATE["callback_url"] = callback_url
 
         print("=== Stage 1 preprocess server starting ===", flush=True)
         print(f"SUBJECT_ID={subject_id}", flush=True)
         print(f"INPUT_PDF_PATH={input_pdf_path}", flush=True)
         print(f"RESULT_OUTPUT_PATH={result_output_path}", flush=True)
         print(f"EXPECTED_PARTS={expected_parts}", flush=True)
-
+        print(f"CALLBACK_URL={callback_url}", flush=True)
         pdf_bytes = await load_pdf_bytes_from_minio(input_pdf_path)
 
         if not pdf_bytes:
@@ -503,14 +525,14 @@ async def part_result(payload: dict):
     if received == expected and not STATE["final_written"]:
         final_result = merge_results()
 
-        await save_json_to_minio(
-            STATE["result_output_path"],
+        await post_json_to_callback(
+            STATE["callback_url"],
             final_result,
         )
 
         STATE["final_written"] = True
 
-        print("=== Final result written ===", flush=True)
+        print("=== Final result posted to API callback ===", flush=True)
 
         asyncio.create_task(
             shutdown_after_final_written(delay_seconds=2)
