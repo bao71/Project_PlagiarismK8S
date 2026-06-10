@@ -396,7 +396,7 @@ async def prepare_data():
         if not pdf_bytes:
             raise ValueError("PDF file is empty")
 
-        print(f"Loaded PDF bytes: {len(pdf_bytes)}", flush=True)
+        print(f"Loaded input file bytes: {len(pdf_bytes)}", flush=True)
 
         full_text, sentence_records = preprocessing.extract_and_preprocess(
             BytesIO(pdf_bytes)

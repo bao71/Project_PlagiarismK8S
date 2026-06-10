@@ -17,6 +17,16 @@ router = APIRouter(
     tags=["Plagiarism Checks"],
 )
 
+from pydantic import BaseModel
+
+
+class SubmitCheckRequest(BaseModel):
+    fileId: str
+    topicId: int
+    subjectId: str
+    originalFilePath: str
+    fileName: str | None = None
+    checkName: str | None = None
 
 # ===== Kubernetes config =====
 
@@ -241,56 +251,37 @@ def create_plagiarism_cr(cr_body: dict[str, Any]) -> None:
 
 
 @router.post("/submit")
-async def submit_from_minio(
-    fileId: str = Form(...),
-    topicId: int = Form(...),
-    subjectId: str = Form(...),
-    originalFilePath: str = Form(...),
-    fileName: str | None = Form(None),
-    comparePods: int = Form(5),
-    checkName: str | None = Form(None),
-):
-    if comparePods <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="comparePods must be greater than 0",
-        )
+async def submit_from_minio(req: SubmitCheckRequest):
+    check_name = normalize_check_name(req.checkName)
+    subject_id = str(req.subjectId)
+    original_file_path = req.originalFilePath.strip()
 
-    check_name = normalize_check_name(checkName)
-    subject_id = str(subjectId)
-    original_file_path = originalFilePath.strip()
-
-    # Validate format + kiểm tra file tồn tại trên MinIO
     validate_minio_object_exists(original_file_path)
 
-    if not fileName:
-        fileName = get_file_name_from_minio_uri(original_file_path)
+    file_name = req.fileName
+    if not file_name:
+        file_name = get_file_name_from_minio_uri(original_file_path)
 
     cr_body = build_cr_body(
         check_name=check_name,
         subject_id=subject_id,
         original_file_path=original_file_path,
-        compare_pods=comparePods,
+        compare_pods=5,
     )
 
-    # Tạo CR để operator chạy job
     create_plagiarism_cr(cr_body)
 
     metadata = {
-        "file_id": str(fileId),
-        "topic_id": int(topicId),
-        "subject_id": str(subjectId),
-        "file_name": fileName,
+        "file_id": str(req.fileId),
+        "topic_id": int(req.topicId),
+        "subject_id": str(req.subjectId),
+        "file_name": file_name,
         "original_file_path": original_file_path,
     }
 
     r = get_redis_client()
 
-    r.setex(
-        status_key(check_name),
-        RESULT_TTL_SECONDS,
-        "submitted",
-    )
+    r.setex(status_key(check_name), RESULT_TTL_SECONDS, "submitted")
 
     r.setex(
         metadata_key(check_name),
@@ -301,16 +292,13 @@ async def submit_from_minio(
     return {
         "checkName": check_name,
         "status": "submitted",
-        "file_id": str(fileId),
-        "topic_id": int(topicId),
+        "file_id": str(req.fileId),
+        "topic_id": int(req.topicId),
         "subject_id": subject_id,
-        "file_name": fileName,
+        "file_name": file_name,
         "originalFilePath": original_file_path,
-        "comparePods": comparePods,
         "resultUrl": f"/plagiarism-checks/{check_name}/result",
-        "cr": cr_body,
     }
-
 
 @router.get("/{check_name}/result")
 def get_result(check_name: str):
