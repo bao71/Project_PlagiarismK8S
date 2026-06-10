@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plagiarism-api
+  namespace: plagiarism
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plagiarism-api
+  template:
+    metadata:
+      labels:
+        app: plagiarism-api
+    spec:
+      serviceAccountName: plagiarism-api-sa
+      containers:
+        - name: plagiarism-api
+          image: baoghetcode/plagiarism-api:1.3
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PLAGIARISM_NAMESPACE
+              value: plagiarism
+            - name: PLAGIARISM_CRD_GROUP
+              value: plagiarism.io
+            - name: PLAGIARISM_CRD_VERSION
+              value: v1
+            - name: PLAGIARISM_CRD_PLURAL
+              value: plagiarismchecks
+
+            - name: MINIO_ENDPOINT
+              value: minio-svc-private.storage.svc.cluster.local:9000
+            - name: MINIO_ACCESS_KEY
+              value: minioadmin
+            - name: MINIO_SECRET_KEY
+              value: minioadmin
+            - name: MINIO_SECURE
+              value: "false"
+            - name: MINIO_UPLOAD_BUCKET
+              value: uploads
+
+            - name: REDIS_HOST
+              value: redis.cache.svc.cluster.local
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB
+              value: "0"
+            - name: REDIS_PASSWORD
+              value: "Redis@123456"
+            - name: RESULT_TTL_SECONDS
+              value: "86400"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plagiarism-api-svc
+  namespace: plagiarism
+spec:
+  type: NodePort
+  selector:
+    app: plagiarism-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30080

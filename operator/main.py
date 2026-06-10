@@ -392,7 +392,8 @@ def dispatch_preprocess_server(
 
         subject_id = spec.get("subjectId")
         input_pdf = spec.get("originalFilePath")
-
+        
+        
         if not subject_id:
             patch_check_status(
                 name=name,

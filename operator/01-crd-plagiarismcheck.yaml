@@ -38,16 +38,7 @@ spec:
                 originalFilePath:
                   type: string
 
-                # Không dùng nữa trong kiến trúc preprocess-server,
-                # nhưng vẫn giữ optional để không lỗi nếu CR cũ còn field này.
-                outputPreprocess:
-                  type: string
-
-                # Final result path.
-                # Nếu không truyền, operator sẽ tự dùng:
-                # minio://results/<check-name>/result.json
-                outputResult:
-                  type: string
+                
 
                 # Số Pod stage 2 compare chạy song song.
                 # Ví dụ 5 pod thì comparePods: 5
@@ -55,6 +46,7 @@ spec:
                   type: integer
                   minimum: 1
                   default: 5
+
 
               required:
                 - subjectId

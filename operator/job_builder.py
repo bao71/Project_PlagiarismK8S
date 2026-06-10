@@ -12,8 +12,8 @@ MILVUS_HOST = "milvus.milvus.svc.cluster.local"
 MILVUS_PORT = "19530"
 EMBEDDING_MODEL = "/models/vietnamese-sbert"
 
-PREPROCESS_SERVER_IMAGE = "baoghetcode/preprocess-server:1.1"
-COMPARE_WORKER_IMAGE = "baoghetcode/compare-worker:1.6"
+PREPROCESS_SERVER_IMAGE = "baoghetcode/preprocess-server:1.4"
+COMPARE_WORKER_IMAGE = "baoghetcode/compare-worker:milvus-clusterv1"
 
 
 def minio_env_vars() -> list[client.V1EnvVar]:
@@ -122,8 +122,24 @@ def build_preprocess_server_pod(
                             value=input_pdf,
                         ),
                         client.V1EnvVar(
-                            name="RESULT_OUTPUT_PATH",
-                            value=result_output_path,
+                            name="CHECK_NAME",
+                            value=name,
+                        ),
+                        client.V1EnvVar(
+                            name="REDIS_HOST",
+                            value="redis.cache.svc.cluster.local",
+                        ),
+                        client.V1EnvVar(
+                            name="REDIS_PORT",
+                            value="6379",
+                        ),
+                        client.V1EnvVar(
+                            name="REDIS_PASSWORD",
+                            value="Redis@123456",
+                        ),
+                        client.V1EnvVar(
+                            name="REDIS_TTL_SECONDS",
+                            value="86400",
                         ),
                         client.V1EnvVar(
                             name="EXPECTED_PARTS",
@@ -252,7 +268,7 @@ def build_compare_job(
                                 ),
                                 client.V1EnvVar(
                                     name="MILVUS_REPLICA_NUMBER",
-                                    value="2",
+                                    value="1",
                                 ),
                                 client.V1EnvVar(
                                     name="MILVUS_COLLECTION_NAME",
