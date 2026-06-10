@@ -1,6 +1,8 @@
 import re
 import unicodedata
+import zipfile
 from io import BytesIO
+from xml.etree import ElementTree
 from dataclasses import dataclass
 
 import pdfplumber
@@ -267,7 +269,108 @@ def _process_page(
     return records, cleaned_text, global_index
 
 
-def extract_and_preprocess(
+def _process_text_block(
+    raw_text: str,
+    page_number: int,
+    global_index: int,
+):
+    cleaned_text = clean_text(raw_text)
+    raw_sentences = sent_tokenize(cleaned_text)
+    records = []
+
+    for s in raw_sentences:
+
+        s = remove_heading_prefix(s)
+
+        s = s.strip()
+
+        if not s:
+            continue
+
+        if not _is_valid_sentence(s):
+            continue
+
+        records.append(
+            SentenceRecord(
+                page_number=page_number,
+                sentence_index=global_index,
+                sentence_index_page=len(records),
+                sentence_text=s,
+
+                bbox_x0=0.0,
+                bbox_y0=0.0,
+                bbox_x1=0.0,
+                bbox_y1=0.0,
+            )
+        )
+
+        global_index += 1
+
+    return records, cleaned_text, global_index
+
+
+def _extract_docx_paragraphs(docx_bytes: BytesIO) -> list[str]:
+    docx_bytes.seek(0)
+
+    try:
+        with zipfile.ZipFile(docx_bytes) as docx_zip:
+            document_xml = docx_zip.read("word/document.xml")
+    except (KeyError, zipfile.BadZipFile) as exc:
+        raise ValueError("File DOCX khong hop le") from exc
+
+    root = ElementTree.fromstring(document_xml)
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paragraphs = []
+
+    for paragraph in root.iter(f"{ns}p"):
+        parts = []
+
+        for node in paragraph.iter():
+            if node.tag == f"{ns}t" and node.text:
+                parts.append(node.text)
+            elif node.tag == f"{ns}tab":
+                parts.append(" ")
+            elif node.tag == f"{ns}br":
+                parts.append("\n")
+
+        paragraph_text = "".join(parts).strip()
+        if paragraph_text:
+            paragraphs.append(paragraph_text)
+
+    return paragraphs
+
+
+def _extract_docx_and_preprocess(
+    docx_bytes: BytesIO,
+):
+
+    all_sentences = []
+
+    full_text_parts = []
+
+    global_index = 0
+
+    paragraphs = _extract_docx_paragraphs(docx_bytes)
+
+    for paragraph_num, paragraph_text in enumerate(paragraphs, start=1):
+
+        records, cleaned_text, global_index = _process_text_block(
+            paragraph_text,
+            paragraph_num,
+            global_index
+        )
+
+        if cleaned_text:
+            full_text_parts.append(cleaned_text)
+
+        all_sentences.extend(records)
+
+    full_text_cleaned = " ".join(full_text_parts)
+
+    return full_text_cleaned, all_sentences
+
+
+def _extract_pdf_and_preprocess(
     pdf_bytes: BytesIO,
 ):
 
@@ -295,3 +398,19 @@ def extract_and_preprocess(
     full_text_cleaned = " ".join(full_text_parts)
 
     return full_text_cleaned, all_sentences
+
+
+def extract_and_preprocess(
+    file_bytes: BytesIO,
+):
+    file_bytes.seek(0)
+    signature = file_bytes.read(4)
+    file_bytes.seek(0)
+
+    if signature.startswith(b"%PDF"):
+        return _extract_pdf_and_preprocess(file_bytes)
+
+    if signature.startswith(b"PK"):
+        return _extract_docx_and_preprocess(file_bytes)
+
+    raise ValueError("Chi ho tro file PDF hoac DOCX")
