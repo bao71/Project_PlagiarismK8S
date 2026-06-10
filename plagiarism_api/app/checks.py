@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 import redis
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
 from minio import Minio
@@ -24,11 +24,7 @@ K8S_GROUP = os.getenv("PLAGIARISM_CRD_GROUP", "plagiarism.io")
 K8S_VERSION = os.getenv("PLAGIARISM_CRD_VERSION", "v1")
 K8S_PLURAL = os.getenv("PLAGIARISM_CRD_PLURAL", "plagiarismchecks")
 K8S_NAMESPACE = os.getenv("PLAGIARISM_NAMESPACE", "plagiarism")
-
-API_INTERNAL_BASE_URL = os.getenv(
-    "API_INTERNAL_BASE_URL",
-    "http://plagiarism-api-svc.plagiarism.svc.cluster.local:8000",
-)
+K8S_KIND = os.getenv("PLAGIARISM_CRD_KIND", "plagiarismcheck")
 
 
 # ===== MinIO config =====
@@ -41,8 +37,11 @@ MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin")
 MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 
-UPLOAD_BUCKET = os.getenv("MINIO_UPLOAD_BUCKET", "uploads")
+# Có validate file tồn tại trên MinIO hay không
+VALIDATE_MINIO_OBJECT = os.getenv("VALIDATE_MINIO_OBJECT", "true").lower() == "true"
 
+
+# ===== Redis config =====
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis.cache.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -60,9 +59,9 @@ def get_redis_client():
         decode_responses=True,
     )
 
+
 def metadata_key(check_name: str) -> str:
     return f"plagiarism:check:{check_name}:metadata"
-
 
 
 def status_key(check_name: str) -> str:
@@ -107,66 +106,89 @@ def normalize_check_name(check_name: str | None = None) -> str:
 
     return name[:63]
 
-
-def sanitize_file_name(file_name: str) -> str:
-    file_name = file_name.strip()
-    file_name = file_name.replace("\\", "/").split("/")[-1]
-    file_name = re.sub(r"[^a-zA-Z0-9._-]", "_", file_name)
-
-    if not file_name:
-        file_name = "document.pdf"
-
-    if not file_name.lower().endswith(".pdf"):
-        file_name = f"{file_name}.pdf"
-
-    return file_name
+ALLOWED_FILE_EXTENSIONS = {".pdf", ".docx"}
 
 
-def ensure_bucket_exists(minio_client: Minio, bucket_name: str) -> None:
-    if not minio_client.bucket_exists(bucket_name):
-        minio_client.make_bucket(bucket_name)
+def is_allowed_document(object_name: str) -> bool:
+    object_name = object_name.lower()
+    return any(object_name.endswith(ext) for ext in ALLOWED_FILE_EXTENSIONS)
 
 
-def upload_pdf_to_minio(file: UploadFile, check_name: str) -> str:
-    if file.content_type != "application/pdf":
+def parse_minio_uri(minio_uri: str) -> tuple[str, str]:
+    """
+    Input:
+        minio://uploads/check-001/case1.pdf
+        minio://uploads/check-001/report.docx
+
+    Output:
+        bucket = uploads
+        object_name = check-001/case1.pdf
+    """
+    if not minio_uri:
         raise HTTPException(
             status_code=400,
-            detail=f"Only PDF files are allowed. content_type={file.content_type}",
+            detail="originalFilePath is required",
         )
 
-    file_name = sanitize_file_name(file.filename or "document.pdf")
-    object_name = f"{check_name}/{file_name}"
+    minio_uri = minio_uri.strip()
+
+    if not minio_uri.startswith("minio://"):
+        raise HTTPException(
+            status_code=400,
+            detail="originalFilePath must start with minio://",
+        )
+
+    path = minio_uri.replace("minio://", "", 1)
+
+    parts = path.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid MinIO path. Expected format: minio://bucket/object",
+        )
+
+    bucket_name = parts[0].strip()
+    object_name = parts[1].strip()
+
+    if not bucket_name or not object_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid MinIO path. Bucket or object name is empty",
+        )
+
+    if not is_allowed_document(object_name):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and DOCX files are allowed",
+        )
+
+    return bucket_name, object_name
+
+
+def get_file_name_from_minio_uri(minio_uri: str) -> str:
+    _, object_name = parse_minio_uri(minio_uri)
+    return object_name.split("/")[-1]
+
+
+def validate_minio_object_exists(minio_uri: str) -> None:
+   
+    bucket_name, object_name = parse_minio_uri(minio_uri)
+
+    if not VALIDATE_MINIO_OBJECT:
+        return
 
     minio_client = get_minio_client()
 
     try:
-        ensure_bucket_exists(minio_client, UPLOAD_BUCKET)
-
-        file.file.seek(0, os.SEEK_END)
-        file_size = file.file.tell()
-        file.file.seek(0)
-
-        if file_size <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file is empty",
-            )
-
-        minio_client.put_object(
-            bucket_name=UPLOAD_BUCKET,
+        minio_client.stat_object(
+            bucket_name=bucket_name,
             object_name=object_name,
-            data=file.file,
-            length=file_size,
-            content_type=file.content_type,
         )
-
     except S3Error as e:
         raise HTTPException(
-            status_code=500,
-            detail=f"Cannot upload file to MinIO: {e}",
+            status_code=400,
+            detail=f"Cannot access MinIO object: {minio_uri}. Error: {e}",
         )
-
-    return f"minio://{UPLOAD_BUCKET}/{object_name}"
 
 
 def build_cr_body(
@@ -174,11 +196,11 @@ def build_cr_body(
     check_name: str,
     subject_id: str,
     original_file_path: str,
-    compare_pods: 5,
+    compare_pods: int,
 ) -> dict[str, Any]:
     return {
         "apiVersion": f"{K8S_GROUP}/{K8S_VERSION}",
-        "kind": "plagiarismcheck",
+        "kind": K8S_KIND,
         "metadata": {
             "name": check_name,
             "namespace": K8S_NAMESPACE,
@@ -187,7 +209,6 @@ def build_cr_body(
             "subjectId": subject_id,
             "originalFilePath": original_file_path,
             "comparePods": compare_pods,
-            
         },
     }
 
@@ -215,18 +236,18 @@ def create_plagiarism_cr(cr_body: dict[str, Any]) -> None:
 
         raise HTTPException(
             status_code=500,
-            detail=f"Cannot create PlagiarismCheck CR: {e.reason}",
+            detail=f"Cannot create PlagiarismCheck CR: {e.reason}. Body: {e.body}",
         )
 
 
-@router.post("/upload")
-async def upload_and_submit(
+@router.post("/submit")
+async def submit_from_minio(
     fileId: str = Form(...),
     topicId: int = Form(...),
     subjectId: str = Form(...),
-    fileName: str = Form(...),
+    originalFilePath: str = Form(...),
+    fileName: str | None = Form(None),
     comparePods: int = Form(5),
-    file: UploadFile = File(...),
     checkName: str | None = Form(None),
 ):
     if comparePods <= 0:
@@ -237,26 +258,22 @@ async def upload_and_submit(
 
     check_name = normalize_check_name(checkName)
     subject_id = str(subjectId)
+    original_file_path = originalFilePath.strip()
 
-    r = get_redis_client()
+    # Validate format + kiểm tra file tồn tại trên MinIO
+    validate_minio_object_exists(original_file_path)
 
-    r.setex(status_key(check_name), RESULT_TTL_SECONDS, "submitted")
-
-    original_file_path = upload_pdf_to_minio(
-        file=file,
-        check_name=check_name,
-    )
-
-    
+    if not fileName:
+        fileName = get_file_name_from_minio_uri(original_file_path)
 
     cr_body = build_cr_body(
         check_name=check_name,
         subject_id=subject_id,
         original_file_path=original_file_path,
         compare_pods=comparePods,
-        
     )
 
+    # Tạo CR để operator chạy job
     create_plagiarism_cr(cr_body)
 
     metadata = {
@@ -264,7 +281,16 @@ async def upload_and_submit(
         "topic_id": int(topicId),
         "subject_id": str(subjectId),
         "file_name": fileName,
+        "original_file_path": original_file_path,
     }
+
+    r = get_redis_client()
+
+    r.setex(
+        status_key(check_name),
+        RESULT_TTL_SECONDS,
+        "submitted",
+    )
 
     r.setex(
         metadata_key(check_name),
@@ -282,6 +308,7 @@ async def upload_and_submit(
         "originalFilePath": original_file_path,
         "comparePods": comparePods,
         "resultUrl": f"/plagiarism-checks/{check_name}/result",
+        "cr": cr_body,
     }
 
 
@@ -302,6 +329,7 @@ def get_result(check_name: str):
         "topic_id": metadata.get("topic_id"),
         "subject_id": metadata.get("subject_id"),
         "file_name": metadata.get("file_name"),
+        "original_file_path": metadata.get("original_file_path"),
     }
 
     if raw_result:
@@ -330,4 +358,3 @@ def get_result(check_name: str):
         status_code=404,
         detail=f"Check not found: {check_name}",
     )
-
