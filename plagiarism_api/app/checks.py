@@ -44,23 +44,25 @@ MINIO_SECURE = os.getenv("MINIO_SECURE", "false").lower() == "true"
 UPLOAD_BUCKET = os.getenv("MINIO_UPLOAD_BUCKET", "uploads")
 
 
-# ===== Redis config =====
-
-REDIS_HOST = os.getenv("REDIS_HOST", "redis-svc.plagiarism.svc.cluster.local")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis.cache.svc.cluster.local")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
-
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 RESULT_TTL_SECONDS = int(os.getenv("RESULT_TTL_SECONDS", "86400"))
 
-def metadata_key(check_name: str) -> str:
-    return f"plagiarism:check:{check_name}:metadata"
-def get_redis_client() -> redis.Redis:
+
+def get_redis_client():
     return redis.Redis(
         host=REDIS_HOST,
         port=REDIS_PORT,
         db=REDIS_DB,
+        password=REDIS_PASSWORD,
         decode_responses=True,
     )
+
+def metadata_key(check_name: str) -> str:
+    return f"plagiarism:check:{check_name}:metadata"
+
 
 
 def status_key(check_name: str) -> str:
