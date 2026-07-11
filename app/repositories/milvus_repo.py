@@ -7,13 +7,23 @@ from pymilvus import (
     DataType,
     utility,
 )
-
+import os
 from app.core.config import settings
 from app.services.preprocessing import SentenceRecord
 
 COLLECTION_NAME = "PlagiarismDetection"
 DIM = 768
 
+def get_milvus_replica_number() -> int:
+    value = os.getenv("MILVUS_REPLICA_NUMBER")
+
+    if value is None:
+        raise RuntimeError(
+            "Missing env MILVUS_REPLICA_NUMBER. "
+            "Please set MILVUS_REPLICA_NUMBER=1 or 2."
+        )
+
+    return int(value)
 
 def connect_milvus():
     connections.connect(
@@ -22,13 +32,23 @@ def connect_milvus():
         port=str(settings.milvus_port),
     )
 
-
 def create_collection_if_not_exists() -> Collection:
     connect_milvus()
 
+    replica_number = get_milvus_replica_number()
+
     if utility.has_collection(COLLECTION_NAME):
         col = Collection(COLLECTION_NAME)
-        col.load()
+
+        print(
+            f"Before Milvus load in milvus_repo: "
+            f"collection={COLLECTION_NAME}, "
+            f"replica_number={replica_number}, "
+            f"MILVUS_HOST={settings.milvus_host}",
+            flush=True,
+        )
+
+        col.load(replica_number=replica_number)
         return col
 
     fields = [
@@ -55,11 +75,20 @@ def create_collection_if_not_exists() -> Collection:
         "metric_type": "COSINE",
         "params": {"M": 16, "efConstruction": 200},
     })
-    collection.create_index(field_name="document_id", index_name="idx_document_id")
-    collection.create_index(field_name="subject_id",  index_name="idx_subject_id")
-    collection.load()
-    return collection
 
+    collection.create_index(field_name="document_id", index_name="idx_document_id")
+    collection.create_index(field_name="subject_id", index_name="idx_subject_id")
+
+    print(
+        f"Before Milvus load after create collection: "
+        f"collection={COLLECTION_NAME}, "
+        f"replica_number={replica_number}, "
+        f"MILVUS_HOST={settings.milvus_host}",
+        flush=True,
+    )
+
+    collection.load(replica_number=replica_number)
+    return collection
 
 def insert_sentences(
     document_id: str,
