@@ -2,10 +2,17 @@ from app.models.check import CheckResponse, MatchedSentence, ReferenceMatch
 from app.repositories import milvus_repo
 from app.services.preprocessing import SentenceRecord
 from pymilvus import Collection
+from underthesea import word_tokenize
 import os
-SENTENCE_SIMILARITY_THRESHOLD = 0.8
-PLAGIARISM_CONCLUSION_THRESHOLD = 0.8
 
+PLAGIARISM_CONCLUSION_THRESHOLD = 0.8
+LEXICAL_NGRAM = 2
+ALPHA = 0.5
+FINAL_SCORE_THRESHOLD = 0.5
+ANISOTROPY_LEX_MAX = 0.05
+ANISOTROPY_SEM_MIN = 0.95
+
+_PUNCT_TOKENS = {".", "!", "?", ",", ";", ":"}
 
 collection_name = os.getenv("MILVUS_COLLECTION_NAME", "PlagiarismDetection")
 
@@ -21,7 +28,36 @@ def get_milvus_replica_number() -> int:
 
     return int(value)
 
+def segment_for_lexical(text: str, cache: dict[str, str]) -> str:
+    if text not in cache:
+        cache[text] = word_tokenize(text, format="text")
+    return cache[text]
 
+def get_ngrams(text: str, cache: dict[str, str], n: int = LEXICAL_NGRAM) -> set:
+    segmented = segment_for_lexical(text, cache)
+    tokens = [t for t in segmented.split() if t not in _PUNCT_TOKENS]
+    if len(tokens) < n:
+        return {tuple(tokens)}
+    return set(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
+
+def lexical_score(query_text: str, ref_text: str, cache: dict[str, str]) -> float:
+    q_grams = get_ngrams(query_text, cache)
+    r_grams = get_ngrams(ref_text, cache)
+    union = q_grams | r_grams
+    if not union:
+        return 0.0
+    return len(q_grams & r_grams) / len(union)
+
+def combine_scores(lexical_score: float, semantic_score: float) -> dict:
+    final_score = ALPHA * lexical_score + (1 - ALPHA) * semantic_score
+    is_anisotropy_flag = (
+        lexical_score < ANISOTROPY_LEX_MAX and semantic_score > ANISOTROPY_SEM_MIN
+    )
+    return {
+        "final_score": round(float(final_score), 4),
+        "is_anisotropy_flag": is_anisotropy_flag,
+        "is_similar": final_score >= FINAL_SCORE_THRESHOLD and not is_anisotropy_flag,
+    }
 
 def check_against_single_reference(
     query_sentences: list[SentenceRecord],
@@ -30,6 +66,7 @@ def check_against_single_reference(
     candidate: dict,
     sentence_labels: list[int],
     collection: Collection,
+    segment_cache: dict[str, str],
 ) -> tuple[int, list[MatchedSentence], float]:
 
     document_id = candidate["document_id"]
@@ -42,7 +79,7 @@ def check_against_single_reference(
     results = collection.search(
         data=active_embeddings,
         anns_field="embedding",
-        param={"metric_type": "COSINE", "params": {"nprobe": 10}},
+        param={"metric_type": "COSINE", "params": {"efsearch": 64}},
         limit=1,
         expr=f"document_id == '{document_id}'",
         output_fields=["sentence_text", "page_number"],
@@ -55,20 +92,27 @@ def check_against_single_reference(
         if not hits:
             continue
         best = hits[0]
-        sim = best.score
-        if sim < SENTENCE_SIMILARITY_THRESHOLD:
+        sim = float(best.score)
+        ref_text = best.entity.get("sentence_text")
+        query_text = query_sentences[c].sentence_text
+
+        lex_score = lexical_score(query_text, ref_text, segment_cache)
+        combined = combine_scores(lex_score, sim)
+
+        if not combined["is_similar"]:
             continue
+
         sentence_labels[c] = 1
         plagiarized_count += 1
         matched_sentences.append(MatchedSentence(
-            query_sentence_index=int(
-                query_sentences[c].sentence_index
-            ),
-            query_sentence_text=query_sentences[c].sentence_text,
+            query_sentence_index=c,
+            query_sentence_text=query_text,
             query_page=query_sentences[c].page_number,
-            ref_sentence_text=best.entity.get("sentence_text"),
+            ref_sentence_text=ref_text,
             ref_page=best.entity.get("page_number"),
-            similarity=float(sim),
+            similarity=sim,
+            lexical_similarity=round(lex_score, 4),
+            final_score=combined["final_score"],
         ))
 
     if plagiarized_count > 0:
@@ -86,13 +130,12 @@ def check(
     query_embeddings: list[list[float]],
     candidates: list[dict],
     sentence_labels: list[int],
+    segment_cache: dict[str, str],
     check_name: str | None = None,
 ) -> list[ReferenceMatch]:
     milvus_repo.connect_milvus()
 
-
     replica_number = get_milvus_replica_number()
-
     collection = Collection(collection_name)
 
     print(
@@ -144,6 +187,7 @@ def check(
                 candidate=candidate,
                 sentence_labels=sentence_labels,
                 collection=collection,
+                segment_cache=segment_cache,
             )
 
             if p_count > 0:
@@ -176,12 +220,14 @@ def run_plagiarism_check(
 ) -> CheckResponse:
     total_sentences = len(query_sentences)
     sentence_labels = [0] * total_sentences
+    segment_cache: dict[str, str] = {}
 
     ref_match = check(
         query_sentences=query_sentences,
         query_embeddings=query_embeddings,
         candidates=candidates,
         sentence_labels=sentence_labels,
+        segment_cache=segment_cache,
         check_name=check_name,
     )
 
@@ -198,31 +244,6 @@ def run_plagiarism_check(
         plagiarized_sentences=total_plagiarized,
         plagiarism_ratio=plagiarism_ratio,
         is_plagiarized=plagiarism_ratio > PLAGIARISM_CONCLUSION_THRESHOLD,
-        sentence_labels=sentence_labels,
+        sentence_labels=[],
         references=ref_match,
     )
-
-
-def find_candidate(
-    query_sentences: list[SentenceRecord],
-    query_embeddings: list[list[float]],
-    candidates: list[dict],
-) -> CheckResponse:
-    if not candidates:
-        return CheckResponse(
-            total_sentences=len(query_sentences),
-            plagiarized_sentences=0,
-            plagiarism_ratio=0.0,
-            is_plagiarized=False,
-            sentence_labels=[0] * len(query_sentences),
-            references=[],
-        )
-    
-    best = max(candidates, key=lambda c: c["jaccard_similarity"])
-
-    result = run_plagiarism_check(
-        query_sentences=query_sentences,
-        query_embeddings=query_embeddings,
-        candidates=[best],
-    )
-    return result
