@@ -3,4 +3,4 @@ uvicorn
 python-multipart
 minio
 kubernetes
-redis==5.0.8
+asyncpg

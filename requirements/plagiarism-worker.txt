@@ -1,0 +1,30 @@
+# Core application
+asyncpg==0.29.0
+minio==7.2.7
+pydantic==2.8.2
+pydantic-settings==2.4.0
+
+# PDF and Vietnamese text processing
+pdfplumber==0.11.4
+underthesea==6.8.4
+
+# MinHash and numerical processing
+datasketch==1.6.5
+numpy==1.26.4
+pandas>=1.2.4
+scikit-learn==1.3.2
+
+# Embeddings
+sentence-transformers==3.0.1
+torch==2.6.0
+
+# Milvus client
+pymilvus==2.2.11
+grpcio==1.53.0
+protobuf>=3.20.0
+ujson>=2.0.0
+marshmallow==3.20.2
+environs==9.5.0
+
+# Build/runtime compatibility
+setuptools>=67,<82

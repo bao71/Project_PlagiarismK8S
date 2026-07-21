@@ -16,11 +16,14 @@ spec:
       serviceAccountName: plagiarism-api-sa
       containers:
         - name: plagiarism-api
-          image: baoghetcode/plagiarism-api:1.3
+          image: baoghetcode/plagiarism-api:postgres-v1
           imagePullPolicy: Always
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+
           env:
+            # PlagiarismCheck CRD
             - name: PLAGIARISM_NAMESPACE
               value: plagiarism
             - name: PLAGIARISM_CRD_GROUP
@@ -29,28 +32,59 @@ spec:
               value: v1
             - name: PLAGIARISM_CRD_PLURAL
               value: plagiarismchecks
+            - name: PLAGIARISM_CRD_KIND
+              value: PlagiarismCheck
 
+            # Result database:
+            # Lưu metadata, trạng thái và kết quả plagiarism.
+            # topic_id chỉ để hiển thị/dev.
+            # subject_id được worker dùng để lọc MinHash.
+            - name: RESULT_POSTGRES_DSN
+              value: postgresql://plagiarism_user:postgres@postgresdb.streaming.svc.cluster.local:5432/plagiarism_system
+
+            # MinIO
             - name: MINIO_ENDPOINT
               value: minio-svc-private.storage.svc.cluster.local:9000
             - name: MINIO_ACCESS_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
             - name: MINIO_SECRET_KEY
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
             - name: MINIO_SECURE
               value: "false"
-            - name: MINIO_UPLOAD_BUCKET
-              value: uploads
+            - name: VALIDATE_MINIO_OBJECT
+              value: "true"
 
-            - name: REDIS_HOST
-              value: redis.cache.svc.cluster.local
-            - name: REDIS_PORT
-              value: "6379"
-            - name: REDIS_DB
-              value: "0"
-            - name: REDIS_PASSWORD
-              value: "Redis@123456"
-            - name: RESULT_TTL_SECONDS
-              value: "86400"
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
 
 ---
 apiVersion: v1
@@ -65,5 +99,5 @@ spec:
   ports:
     - name: http
       port: 8000
-      targetPort: 8000
+      targetPort: http
       nodePort: 30080
